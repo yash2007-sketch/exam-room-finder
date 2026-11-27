@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Exam Room Finder</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--text:#1b1f2a;--muted:#667085;--accent:#3b5bdb;--ok:#0a7d4f;--bad:#c92a2a;--line:#e4e7ee}
+@media (prefers-color-scheme:dark){:root{--bg:#12141a;--card:#1c1f28;--text:#eceef4;--muted:#9aa1b2;--accent:#7c93ff;--ok:#4cd39a;--bad:#ff7b7b;--line:#2c303c;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+main{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.4rem;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+input[type=text],input[type=password]{width:100%;font-size:1.2rem;padding:12px;border:2px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)}
+#usn{text-transform:uppercase;letter-spacing:1px;font-size:1.3rem}
+input:focus{outline:none;border-color:var(--accent)}
+button{font:inherit;padding:11px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.result{text-align:center}
+.room{font-size:4.5rem;font-weight:800;color:var(--ok);line-height:1.1;margin:6px 0}
+.label{color:var(--muted);font-size:.85rem;text-transform:uppercase;letter-spacing:1px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px;text-align:left}
+.grid div{background:var(--bg);border-radius:8px;padding:10px}
+.grid b{display:block;font-size:1.05rem}
+.err{color:var(--bad);font-weight:600;text-align:center}
+.timer{height:4px;background:var(--line);border-radius:2px;margin-top:14px;overflow:hidden}
+.timer i{display:block;height:100%;background:var(--accent);width:100%}
+details summary{cursor:pointer;font-weight:600}
+#reader{width:100%;margin-top:12px}
+small{color:var(--muted)}
+textarea{width:100%;margin-top:10px;font:inherit;font-size:.9rem;padding:10px;border:2px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)}
+#exam{font-size:1rem;margin-top:6px}
+</style>
+</head>
+<body>
+<main>
+<h1>🎓 Exam Room Finder</h1>
+<p class="sub">Scan your ID card barcode or type your USN to find your exam room.</p>
+
+<div class="card">
+  <input type="text" id="usn" placeholder="Scan or type USN" autocomplete="off" autofocus>
+  <div class="row">
+    <button class="primary" id="go">Find my room</button>
+    <button id="cam">📷 Scan with camera</button>
+  </div>
+  <div id="reader"></div>
+</div>
+
+<div class="card" id="out" hidden></div>
+
+<details class="card">
+  <summary>Admin: upload seating plan</summary>
+  <p><small>CSV with a header row. Required columns: <b>usn, room</b>. Optional: block, floor, subject, date, time. Uploading replaces the old plan for all devices.</small></p>
+  <p><small><b>Option A: paste ranges</b>, one room per line as on the allotment sheet.</small></p>
+  <input type="text" id="exam" placeholder="Exam label, e.g. Internal Test T1 · 10–12 Sep 2026">
+  <textarea id="ranges" rows="8" placeholder="NB017: 1MV23EC096-126, 1MV24EC400-409&#10;NB104: 1MV23AI001-38, 1MV22AI038"></textarea>
+  <p><small><b>Option B: CSV file</b> (used only if the box above is empty)</small></p>
+  <div class="row"><input type="file" id="file" accept=".csv"></div>
+  <p><input type="password" id="pw" placeholder="Admin password"></p>
+  <div class="row"><button class="primary" id="upload">Upload to server</button></div>
+  <p id="msg"><small></small></p>
+</details>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script>
+var $ = function(id){return document.getElementById(id)};
+function esc(x){return String(x).replace(/[<>&]/g,"")}
+function msg(t){ $("msg").innerHTML = "<small>" + esc(t) + "</small>"; }
+
+var ALIAS={usn:"usn",studentusn:"usn",room:"room",roomno:"room",roomnumber:"room",roomnum:"room",block:"block",floor:"floor",subject:"subject",subjectname:"subject",date:"date",examdate:"date",time:"time",examtime:"time"};
+function norm(h){return h.toLowerCase().replace(/[^a-z]/g,"");}
+function parseCSV(text){
+  var lines = text.replace(/^\uFEFF/,"").split(/\r?\n/).filter(function(l){return l.trim()});
+  if(lines.length < 2) return {out:{},n:0};
+  var d = [",",";","\t"].reduce(function(b,c){return lines[0].split(c).length > lines[0].split(b).length ? c : b}, ",");
+  var split = function(l){return l.split(d).map(function(x){return x.trim().replace(/^"|"$/g,"")})};
+  var head = split(lines[0]).map(function(h){return ALIAS[norm(h)] || norm(h)});
+  var out = {}, n = 0;
+  for(var i=1;i<lines.length;i++){
+    var c = split(lines[i]), r = {};
+    head.forEach(function(h,j){ r[h] = c[j] || ""; });
+    if(r.usn && r.room){ out[r.usn.replace(/\s/g,"").toUpperCase()] = r; n++; }
+  }
+  return {out:out,n:n};
+}
+
+function parseRanges(text, exam){
+  var out = {}, n = 0, errs = [];
+  text.split(/\r?\n/).forEach(function(line){
+    line = line.trim(); if(!line) return;
+    var i = line.search(/[:|]/);
+    if(i < 1){ errs.push(line.slice(0,30)); return; }
+    var room = line.slice(0,i).trim();
+    line.slice(i+1).split(/[,;]+/).forEach(function(item){
+      item = item.trim().toUpperCase().replace(/\s+/g,""); if(!item) return;
+      var m = item.match(/^(.*?)(\d{3})(?:[-–](\d{1,3}))?$/);
+      if(!m){ errs.push(item); return; }
+      var st = parseInt(m[2],10), en = m[3] ? parseInt(m[3],10) : st;
+      if(en < st || en - st > 400){ errs.push(item); return; }
+      for(var k=st;k<=en;k++){ out[m[1] + String(k).padStart(3,"0")] = {room:room, exam:exam}; n++; }
+    });
+  });
+  return {out:out, n:n, errs:errs};
+}
+
+var hideTimer = null;
+function show(html){
+  var box = $("out"); box.hidden = false; box.innerHTML = html;
+  clearTimeout(hideTimer);
+  var bar = box.querySelector(".timer i");
+  if(bar){ bar.style.transition = "width 10s linear"; setTimeout(function(){bar.style.width="0"},50); }
+  hideTimer = setTimeout(function(){ box.hidden = true; $("usn").value = ""; $("usn").focus(); }, 10000);
+}
+
+async function lookup(v){
+  v = (v || $("usn").value).trim().toUpperCase().replace(/\s/g,"");
+  if(!v) return;
+  try{
+    var res = await fetch("/api/seating?usn=" + encodeURIComponent(v), {cache:"no-store"});
+    if(res.status === 404){
+      show('<p class="err">No allotment found for ' + esc(v) + '.<br><small>Check the USN or contact the exam section.</small></p><div class="timer"><i></i></div>');
+      return;
+    }
+    if(!res.ok) throw new Error("bad");
+    var r = await res.json();
+    var cells = [["Exam",r.exam],["Block",r.block],["Floor",r.floor],["Subject",r.subject],["Date",r.date],["Time",r.time]]
+      .filter(function(x){return x[1]})
+      .map(function(x){return "<div><span class='label'>"+x[0]+"</span><b>"+esc(x[1])+"</b></div>"}).join("");
+    show('<div class="result"><div class="label">' + esc(v) + ' · Your room</div><div class="room">' + esc(r.room) +
+         '</div><div class="grid">' + cells + '</div><div class="timer"><i></i></div></div>');
+  }catch(e){
+    show('<p class="err">Could not reach the server. Please try again.</p><div class="timer"><i></i></div>');
+  }
+}
+$("go").onclick = function(){ lookup(); };
+$("usn").addEventListener("keydown", function(e){ if(e.key === "Enter") lookup(); });
+
+$("upload").onclick = async function(){
+  var f = $("file").files[0], pw = $("pw").value, txt = $("ranges").value.trim();
+  if(!pw || (!f && !txt)){ msg("Enter the admin password and either paste ranges or choose a CSV file."); return; }
+  var p;
+  if(txt){
+    p = parseRanges(txt, $("exam").value.trim());
+    if(p.errs.length){ msg("Could not read: " + p.errs.slice(0,5).join(", ") + ". Nothing was uploaded."); return; }
+  } else { p = parseCSV(await f.text()); }
+  if(!p.n){ msg("No valid rows found."); return; }
+  try{
+    var res = await fetch("/api/seating", {method:"POST", headers:{"x-admin-password":pw,"content-type":"application/json"}, body:JSON.stringify(p.out)});
+    if(res.ok) msg(p.n + " students uploaded. All devices now see this plan.");
+    else if(res.status === 401) msg("Wrong admin password.");
+    else msg("Upload failed (" + res.status + ").");
+  }catch(e){ msg("Could not reach the server."); }
+};
+
+fetch("/api/seating", {cache:"no-store"}).then(function(r){return r.json()})
+  .then(function(j){ if(typeof j.count === "number") msg(j.count + " students currently on the server."); }).catch(function(){});
+
+var scanner = null;
+$("cam").onclick = function(){
+  if(scanner){ scanner.stop().catch(function(){}); scanner = null; $("reader").innerHTML = ""; return; }
+  if(typeof Html5Qrcode === "undefined"){ alert("Camera scanner library did not load."); return; }
+  scanner = new Html5Qrcode("reader");
+  var F = Html5QrcodeSupportedFormats;
+  scanner.start({facingMode:"environment"},
+    {fps:10, qrbox:{width:280,height:120}, formatsToSupport:[F.CODE_128,F.CODE_39,F.EAN_13,F.QR_CODE]},
+    function(text){ $("usn").value = text; scanner.stop().catch(function(){}); scanner = null; $("reader").innerHTML = ""; lookup(text); },
+    function(){}
+  ).catch(function(){ alert("Could not open the camera. Use a USB scanner or type the USN."); scanner = null; });
+};
+</script>
+</body>
+</html>
